@@ -7,9 +7,12 @@ channels:
 dependencies:
   - python=3.10                   # Fix version for reproducibility
   - pytorch=2.0.0                 # |
+  - pytorch-cuda=11.8
   - pytorch-lightning=1.9.4       # |
   - libprotobuf=3.19.6    # Protobuf
   - protobuf=3.19.6       # | 4.x has weird linking bugs...
+  - mkl=2023.2.0
+  - numpy<2.0.0
   - tensorboard
   - wandb
   - pybind11

@@ -10,23 +10,19 @@ import gc
 import random
 from typing import Optional
 
-import torch
 import numpy as np
+import torch
+from fvdb import JaggedTensor
 from nksr import NKSRNetwork, SparseFeatureHierarchy
-from nksr.fields import KernelField, NeuralField, LayerField
 from nksr.configs import load_checkpoint_from_url
-
+from nksr.fields import KernelField, LayerField, NeuralField
+from nksr.utils import jagged_cat
 from pycg import exp, vis
-
-from dataset.base import DatasetSpec as DS, list_collate
-from models.base_model import BaseModel
 from pycg.isometry import ScaledIsometry
 
-
-# Cache SVH during training, as backward also needs them.
-#   (this is due to the intrusive_ptr in ctx only stores the pointer)
-
-SVH_CACHE = []
+from dataset.base import DatasetSpec as DS
+from dataset.base import list_collate
+from models.base_model import BaseModel
 
 
 class Model(BaseModel):
@@ -39,16 +35,16 @@ class Model(BaseModel):
 
     @exp.mem_profile(every=1)
     def forward(self, batch, out: dict):
-        input_xyz = batch[DS.INPUT_PC][0]
-        assert input_xyz.ndim == 2, "Can only forward single batch."
+        input_xyz = JaggedTensor(batch[DS.INPUT_PC])
 
         if self.hparams.feature == 'normal':
             assert DS.TARGET_NORMAL in batch.keys(), "normal must be provided in this config!"
-            feat = batch[DS.TARGET_NORMAL][0]
+            feat = JaggedTensor(batch[DS.TARGET_NORMAL])
         elif self.hparams.feature == 'sensor':
             assert DS.INPUT_SENSOR_POS in batch.keys(), "sensor must be provided in this config!"
-            view_dir = batch[DS.INPUT_SENSOR_POS][0] - input_xyz
-            view_dir = view_dir / (torch.linalg.norm(view_dir, dim=-1, keepdim=True) + 1e-6)
+            view_dir = JaggedTensor(batch[DS.INPUT_SENSOR_POS]) - input_xyz
+            view_dir.jdata = view_dir.jdata / \
+                (torch.linalg.norm(view_dir.jdata, dim=-1, keepdim=True) + 1e-6)
             feat = view_dir
         else:
             feat = None
@@ -63,12 +59,17 @@ class Model(BaseModel):
 
         # Compute density by computing points per voxel.
         if self.hparams.runtime_density:
-            q_xyz = torch.unique(torch.div(input_xyz, self.hparams.voxel_size).floor().int(), dim=0)
-            density = input_xyz.size(0) / q_xyz.size(0)
-            exp.logger.info(f"Density {density}, # pts = {input_xyz.size(0)}")
+            q_xyz = torch.div(input_xyz.jdata, self.hparams.voxel_size).floor().int()
+            q_xyz = torch.unique(torch.cat([q_xyz, input_xyz.jidx[:, None]], dim=-1), dim=0)
+            density = input_xyz.jdata.size(0) / q_xyz.size(0)
+            exp.logger.info(f"Density {density}, # pts = {input_xyz.jdata.size(0)}")
 
         if self.hparams.runtime_visualize:
-            vis.show_3d([vis.pointcloud(input_xyz, normal=feat)], enc_svh.get_visualization())
+            for batch_idx in range(input_xyz.joffsets.size(0)):
+                vis.show_3d([vis.pointcloud(
+                    input_xyz[batch_idx].jdata,
+                    normal=feat[batch_idx].jdata if feat is not None else None)],
+                    enc_svh.get_visualization(batch_idx))
 
         feat = self.network.encoder(input_xyz, feat, enc_svh, 0)
         feat, dec_svh, udf_svh = self.network.unet(
@@ -77,15 +78,13 @@ class Model(BaseModel):
             gt_decoder_svh=out.get('gt_svh', None)
         )
 
-        if all([dec_svh.grids[d] is None for d in range(self.hparams.adaptive_depth)]):
+        if all([dec_svh.grids[d].total_voxels == 0 for d in range(self.hparams.adaptive_depth)]):
             if self.trainer.training or self.trainer.validating:
                 # In case training data is corrupted (pd & gt not aligned)...
                 exp.logger.warning("Empty grid detected during training/validation.")
                 return None
 
         out.update({'enc_svh': enc_svh, 'dec_svh': dec_svh, 'dec_tmp_svh': udf_svh})
-        if self.trainer.training:
-            SVH_CACHE.append([enc_svh, dec_svh, udf_svh])
 
         if self.hparams.geometry == 'kernel':
             output_field = KernelField(
@@ -97,16 +96,16 @@ class Model(BaseModel):
             if self.hparams.solver_verbose:
                 output_field.solver_config['verbose'] = True
 
-            normal_xyz = torch.cat([dec_svh.get_voxel_centers(d) for d in range(self.hparams.adaptive_depth)])
-            normal_value = torch.cat([feat.normal_features[d] for d in range(self.hparams.adaptive_depth)])
+            normal_xyz = jagged_cat([dec_svh.get_voxel_centers(d) for d in range(self.hparams.adaptive_depth)])
+            normal_value = jagged_cat([feat.normal_features[d] for d in range(self.hparams.adaptive_depth)])
 
-            normal_weight = self.hparams.solver.normal_weight / normal_xyz.size(0) * \
-                (self.hparams.voxel_size ** 2)
-            output_field.solve_non_fused(
+            normal_weight = self.hparams.solver.normal_weight * (self.hparams.voxel_size ** 2) / \
+                (normal_xyz.joffsets[1:] - normal_xyz.joffsets[:-1])
+            output_field.solve(
                 pos_xyz=input_xyz,
                 normal_xyz=normal_xyz,
                 normal_value=-normal_value,
-                pos_weight=self.hparams.solver.pos_weight / input_xyz.size(0),
+                pos_weight=self.hparams.solver.pos_weight / (input_xyz.joffsets[1:] - input_xyz.joffsets[:-1]),
                 normal_weight=normal_weight,
                 reg_weight=1.0
             )
@@ -140,14 +139,10 @@ class Model(BaseModel):
         })
         return out
 
-    def on_after_backward(self):
-        super().on_after_backward()
-        SVH_CACHE.clear()
-
-    def transform_field_visualize(self, field: torch.Tensor):
+    def transform_field_visualize(self, field: JaggedTensor):
         spatial_config = self.hparams.supervision.spatial
         if spatial_config.gt_type == "binary":
-            return torch.tanh(field)
+            return field.jagged_like(torch.tanh(field.jdata))
         else:
             if spatial_config.pd_transform:
                 from models.loss import KitchenSinkMetricLoss
@@ -160,10 +155,12 @@ class Model(BaseModel):
             return out['gt_svh']
 
         if DS.GT_GEOMETRY in batch.keys():
+            assert len(batch[DS.GT_GEOMETRY]) == 1, "Does not support batching now."
             ref_geometry = batch[DS.GT_GEOMETRY][0]
             ref_xyz, ref_normal, _ = ref_geometry.torch_attr()
         else:
-            ref_xyz, ref_normal = batch[DS.GT_DENSE_PC][0], batch[DS.GT_DENSE_NORMAL][0]
+            ref_xyz = JaggedTensor(batch[DS.GT_DENSE_PC])
+            ref_normal = JaggedTensor(batch[DS.GT_DENSE_NORMAL])
 
         gt_svh = SparseFeatureHierarchy(
             voxel_size=self.hparams.voxel_size,
@@ -189,7 +186,8 @@ class Model(BaseModel):
         loss_dict = exp.TorchLossMeter()
         metric_dict = exp.TorchLossMeter()
 
-        from models.loss import GTSurfaceLoss, SpatialLoss, StructureLoss, UDFLoss, ShapeNetIoUMetric
+        from models.loss import (GTSurfaceLoss, ShapeNetIoUMetric, SpatialLoss,
+                                 StructureLoss, UDFLoss)
 
         SpatialLoss.apply(self.hparams, loss_dict, metric_dict, batch, out, compute_metric)
         GTSurfaceLoss.apply(self.hparams, loss_dict, metric_dict, batch, out, compute_metric)
@@ -261,12 +259,9 @@ class Model(BaseModel):
         return loss_sum
 
     def test_step(self, batch, batch_idx):
-        test_transform, test_inv_transform = None, None
+        test_transform = None
         if self.hparams.test_transform is not None:
             test_transform = ScaledIsometry.from_matrix(np.array(self.hparams.test_transform))
-            test_inv_transform = test_transform.inv()
-
-        self.log('source', batch[DS.SHAPE_NAME][0])
 
         out = {'idx': batch_idx}
         self.transform_batch_input(batch, test_transform)
@@ -280,20 +275,28 @@ class Model(BaseModel):
         # self.log_dict(loss_dict)
         # self.log_dict(metric_dict)
 
+        self.transform_batch_input(batch, test_transform.inv() if test_transform is not None else None)
+
         field = out['field']
-        mesh_res = field.extract_dual_mesh(grid_upsample=self.hparams.test_n_upsample)
+        batch_size = field.svh.grids[-1].grid_count
+        
+        for b in range(batch_size):
+            exp.logger.info(f"Now visualizing data {b + 1} of {batch_size}...")
+            self._test_metric_and_visualize(b, batch, field, test_transform)
+
+    def _test_metric_and_visualize(self, batch_idx: int, batch, field, test_transform):
+        mesh_res = field.extract_dual_mesh(grid_upsample=self.hparams.test_n_upsample, batch_idx=batch_idx)
         mesh = vis.mesh(mesh_res.v, mesh_res.f)
 
-        self.transform_batch_input(batch, test_inv_transform)
-        if test_inv_transform is not None:
-            mesh = test_inv_transform @ mesh
+        if test_transform is not None:
+            mesh = test_transform.inv() @ mesh
 
         if DS.GT_GEOMETRY in batch.keys():
-            ref_geometry = batch[DS.GT_GEOMETRY][0]
+            ref_geometry = batch[DS.GT_GEOMETRY][batch_idx]
             ref_xyz, ref_normal, _ = ref_geometry.torch_attr()
         else:
             ref_geometry = None
-            ref_xyz, ref_normal = batch[DS.GT_DENSE_PC][0], batch[DS.GT_DENSE_NORMAL][0]
+            ref_xyz, ref_normal = batch[DS.GT_DENSE_PC][batch_idx], batch[DS.GT_DENSE_NORMAL][batch_idx]
 
         if self.hparams.test_print_metrics:
             from metrics import MeshEvaluator
@@ -304,14 +307,15 @@ class Model(BaseModel):
             onet_samples = None
             if DS.GT_ONET_SAMPLE in batch:
                 onet_samples = [
-                    batch[DS.GT_ONET_SAMPLE][0][0].cpu().numpy(),
-                    batch[DS.GT_ONET_SAMPLE][1][0].cpu().numpy()
+                    batch[DS.GT_ONET_SAMPLE][0][batch_idx].cpu().numpy(),
+                    batch[DS.GT_ONET_SAMPLE][1][batch_idx].cpu().numpy()
                 ]
             eval_dict = evaluator.eval_mesh(mesh, ref_xyz, ref_normal, onet_samples=onet_samples)
             self.log_dict(eval_dict)
             exp.logger.info("Metric: " + ", ".join([f"{k} = {v:.4f}" for k, v in eval_dict.items()]))
 
-        input_pc = batch[DS.INPUT_PC][0]
+        input_pc = batch[DS.INPUT_PC][batch_idx]
+        self.log('source', batch[DS.SHAPE_NAME][batch_idx])
 
         if self.record_folder is not None:
             # Record also input for comparison.
@@ -321,7 +325,7 @@ class Model(BaseModel):
             })
 
         if self.hparams.visualize:
-            exp.logger.info(f"Visualizing data {batch[DS.SHAPE_NAME][0]}...")
+            exp.logger.info(f"Visualizing data {batch[DS.SHAPE_NAME][batch_idx]}...")
             scenes = vis.show_3d(
                 [vis.pointcloud(input_pc), mesh],
                 [vis.pointcloud(ref_xyz, normal=ref_normal)],
@@ -334,11 +338,13 @@ class Model(BaseModel):
     def transform_batch_input(cls, batch, transform: Optional[ScaledIsometry]):
         if transform is None:
             return
-        batch[DS.INPUT_PC][0] = transform @ batch[DS.INPUT_PC][0]
-        if DS.TARGET_NORMAL in batch:
-            batch[DS.TARGET_NORMAL][0] = transform.rotation @ batch[DS.TARGET_NORMAL][0]
-        if DS.INPUT_SENSOR_POS in batch:
-            batch[DS.INPUT_SENSOR_POS][0] = transform @ batch[DS.INPUT_SENSOR_POS][0]
+        batch_size = len(batch[DS.INPUT_PC])
+        for b in range(batch_size):
+            batch[DS.INPUT_PC][b] = transform @ batch[DS.INPUT_PC][b]
+            if DS.TARGET_NORMAL in batch:
+                batch[DS.TARGET_NORMAL][b] = transform.rotation @ batch[DS.TARGET_NORMAL][b]
+            if DS.INPUT_SENSOR_POS in batch:
+                batch[DS.INPUT_SENSOR_POS][b] = transform @ batch[DS.INPUT_SENSOR_POS][b]
 
     def get_dataset_spec(self):
         all_specs = [DS.SHAPE_NAME, DS.INPUT_PC,

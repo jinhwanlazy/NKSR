@@ -24,7 +24,8 @@ For business inquiries, please visit our website and submit the form: [NVIDIA Re
 
 ## News
 
-- 2023-06-24 🔥: Want to build a mesh from an iPhone scan? Our friend [Phong Nguyen Ha](https://github.com/phongnhhn92) kindly shared his tutorial for doing this! Check it out [here](https://drive.google.com/drive/folders/1RESJ6w6DND4mh8V-YY0a3rvSfSR0dQdD?usp=sharing).
+- 2024-10-18: NKSR v1.1 using [fVDB](https://developer.nvidia.com/fvdb) is now available. We also open-sourced the C++/CUDA code of the kernel solver and evaluator.
+- 2023-06-24: Want to build a mesh from an iPhone scan? Our friend [Phong Nguyen Ha](https://github.com/phongnhhn92) kindly shared his tutorial for doing this! Check it out [here](https://drive.google.com/drive/folders/1RESJ6w6DND4mh8V-YY0a3rvSfSR0dQdD?usp=sharing).
 - 2023-06-08: Code released!
 
 ## Environment setup
@@ -36,17 +37,14 @@ We recommend using the latest Python and PyTorch to run our algorithm. To instal
 git clone git@github.com:nv-tlabs/nksr.git
 cd nksr
 
-# Create conda environment
-conda env create
-
-# Activate it
+# Create conda environment and activate it
+conda env create -f environment.yml
 conda activate nksr
 
-# Install NKSR
-pip install nksr -f https://nksr.huangjh.tech/whl/torch-2.0.0+cu118.html
+# Install NKSR CUDA package
+cd package/
+python setup.py develop
 ```
-
-> For docker users, we suggest using a base image from [nvidia/cuda](https://hub.docker.com/r/nvidia/cuda) with tag `11.8.0-cudnn8-devel-ubuntu22.04`, and applying the above conda setup over it.
 
 ## Testing NKSR on your own data
 

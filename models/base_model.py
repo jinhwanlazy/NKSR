@@ -28,7 +28,7 @@ import matplotlib.figure
 import matplotlib.pyplot as plt
 import numpy as np
 import omegaconf.errors
-import open3d as o3d
+from pycg import o3d
 import pytorch_lightning as pl
 import torch
 from omegaconf import OmegaConf

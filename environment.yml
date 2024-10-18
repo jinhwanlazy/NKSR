@@ -1,17 +1,19 @@
 name: nksr
 channels:
   - pyg
-  - nvidia/label/cuda-11.8.0
+  - nvidia/label/cuda-12.1.0
   - pytorch
   - conda-forge
+  - https://conda.anaconda.org/t/nv-d2214d8d-451e-48fe-8a69-7a2a5ad3b6f5/nvidia
 dependencies:
   - python=3.10                   # Fix version for reproducibility
-  - pytorch=2.0.0                 # |
-  - pytorch-cuda=11.8
+  - pytorch=2.4.0                 # |
+  - pytorch-cuda=12.1
   - pytorch-lightning=1.9.4       # |
-  - libprotobuf=3.19.6    # Protobuf
-  - protobuf=3.19.6       # | 4.x has weird linking bugs...
-  - mkl=2023.2.0
+  - fvdb
+  - libprotobuf
+  - protobuf
+  - mkl
   - numpy<2.0.0
   - tensorboard
   - wandb
@@ -45,7 +47,9 @@ dependencies:
   - pyntcloud
   - pip:
     - -f https://pycg.huangjh.tech/packages/index.html
-    - python-pycg[full]==0.5.2
+    - python-pycg
+    - open3d_pycg_cpu
+    - open3d
     - randomname
     - pykdtree
     - plyfile

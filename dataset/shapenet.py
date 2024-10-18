@@ -103,7 +103,7 @@ class ShapeNetDataset(RandomSafeDataset):
             data[DS.TARGET_NORMAL] = gt_normals
 
         if DS.GT_MESH in self.spec or DS.GT_MESH_SOUP in self.spec:
-            import open3d as o3d
+            from pycg import o3d
             origin_mesh_path = self.shapenet_base_path / category / model / 'model.obj'
             origin_mesh = o3d.io.read_triangle_mesh(str(origin_mesh_path))
             origin_mesh.scale(1.0 / gt_data['scale'], center=[0.0, 0.0, 0.0])

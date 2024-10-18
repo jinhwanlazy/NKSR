@@ -1,4 +1,4 @@
-import open3d as o3d
+from pycg import o3d
 from pathlib import Path
 
 import numpy as np

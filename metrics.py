@@ -8,7 +8,7 @@
 
 import numpy as np
 import torch
-import open3d as o3d
+from pycg import o3d
 from pycg import vis, exp
 from pykdtree.kdtree import KDTree
 

@@ -21,7 +21,7 @@ from pdb import set_trace as st
 
 import matplotlib.figure
 import numpy as np
-import open3d as o3d
+from pycg import o3d
 import pandas as pd
 import pytorch_lightning as pl
 import torch

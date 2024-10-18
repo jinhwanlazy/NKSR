@@ -1,5 +1,5 @@
 from pathlib import Path
-import open3d as o3d
+from pycg import o3d
 
 import numpy as np
 from pycg.exp import logger

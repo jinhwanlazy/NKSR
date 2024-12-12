@@ -38,18 +38,20 @@ def scatter_min(
         out: Optional[torch.Tensor] = None,
         dim_size: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     index = broadcast(index, src, dim)
+    include_self = out is not None
     if out is None:
         out = create_scatter_output(src, index, dim, dim_size)
-    return out.scatter_reduce_(dim, index, src, reduce="amin")
+    return out.scatter_reduce_(dim, index, src, reduce="amin", include_self=include_self)
 
 def scatter_max(
         src: torch.Tensor, index: torch.Tensor, dim: int = -1,
         out: Optional[torch.Tensor] = None,
         dim_size: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     index = broadcast(index, src, dim)
+    include_self = out is not None
     if out is None:
         out = create_scatter_output(src, index, dim, dim_size)
-    return out.scatter_reduce_(dim, index, src, reduce="amax")
+    return out.scatter_reduce_(dim, index, src, reduce="amax", include_self=include_self)
 
 def scatter_mean(src: torch.Tensor, index: torch.Tensor, dim: int = -1,
                  out: Optional[torch.Tensor] = None,
